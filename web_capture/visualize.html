@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mouse Trajectory Visualizer</title>
+  <style>
+    html, body { height: 100%; margin: 0; }
+    body { background: #f8f9fa; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+    header { padding: 10px 12px; background: #fff; border-bottom: 1px solid #e5e7eb; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    #status { margin-left: auto; font-size: 12px; color: #555; }
+    main { display: flex; justify-content: center; padding: 16px; }
+    #wrap { position: relative; }
+    #canvas { display: block; background: #fff; box-shadow: 0 0 0 1px #ddd inset; }
+    #hud { position: absolute; top: 8px; left: 8px; background: rgba(255,255,255,0.85); padding: 6px 8px; border-radius: 6px; font-size: 12px; }
+    button, select { padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; }
+    button:hover { background: #f3f4f6; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Visualizer</strong>
+    <select id="sessionSel"></select>
+    <button id="reload">Reload Sessions</button>
+    <div style="width:12px"></div>
+    <button id="prev">Prev</button>
+    <button id="play">Play</button>
+    <button id="next">Next</button>
+    <label>Speed <select id="speed"><option>0.5</option><option selected>1</option><option>2</option><option>4</option></select>x</label>
+    <span id="status"></span>
+  </header>
+  <main>
+    <div id="wrap">
+      <div id="hud">Trial <span id="trial">0</span>/<span id="total">0</span></div>
+      <canvas id="canvas" width="750" height="550"></canvas>
+    </div>
+  </main>
+  <script>
+    const $ = (q) => document.querySelector(q);
+    const sessionSel = $('#sessionSel');
+    const reloadBtn = $('#reload');
+    const prevBtn = $('#prev');
+    const playBtn = $('#play');
+    const nextBtn = $('#next');
+    const speedSel = $('#speed');
+    const status = $('#status');
+    const trialLbl = $('#trial');
+    const totalLbl = $('#total');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    let records = [];
+    let idx = 0; // current trial idx
+    let playing = false;
+    let startMs = 0;
+    let pointer = 0; // path index cursor
+
+    function setCanvasSize(w, h) {
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function drawFrame(sampleIndex = null) {
+      if (!records.length) return;
+      const rec = records[idx];
+      const { width, height } = rec.window || { width: 750, height: 550 };
+      setCanvasSize(width, height);
+      ctx.clearRect(0, 0, width, height);
+      // target
+      ctx.fillStyle = 'red';
+      ctx.beginPath();
+      ctx.arc(rec.target.x, rec.target.y, rec.target.radius, 0, Math.PI * 2);
+      ctx.fill();
+      // path up to sampleIndex
+      const path = rec.path || [];
+      const n = (sampleIndex == null) ? path.length : Math.max(0, Math.min(path.length, sampleIndex));
+      if (n > 0) {
+        ctx.strokeStyle = '#2563eb';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(path[0].x, path[0].y);
+        for (let i = 1; i < n; i++) ctx.lineTo(path[i].x, path[i].y);
+        ctx.stroke();
+        // pointer
+        const p = path[n - 1];
+        ctx.fillStyle = '#1d4ed8';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function updateHUD() {
+      trialLbl.textContent = (idx + 1);
+      totalLbl.textContent = records.length;
+      status.textContent = records.length ? (records[idx].timestamp || '') : '';
+    }
+
+    async function loadSessions() {
+      sessionSel.innerHTML = '';
+      const res = await fetch('/sessions');
+      const data = await res.json();
+      const list = data.sessions || [];
+      list.sort();
+      for (const name of list) {
+        const opt = document.createElement('option');
+        opt.value = name; opt.textContent = name;
+        sessionSel.appendChild(opt);
+      }
+      return list;
+    }
+
+    async function loadData(name) {
+      const res = await fetch('/data/' + encodeURIComponent(name));
+      const text = await res.text();
+      records = text.split('\n').filter(Boolean).map(line => {
+        try { return JSON.parse(line); } catch { return null; }
+      }).filter(Boolean);
+      idx = 0; pointer = 0; playing = false; playBtn.textContent = 'Play';
+      updateHUD();
+      drawFrame(0);
+    }
+
+    function playCurrent() {
+      if (!records.length) return;
+      const rec = records[idx];
+      const path = rec.path || [];
+      if (path.length === 0) { drawFrame(0); return; }
+      playing = true; playBtn.textContent = 'Pause';
+      pointer = 0; startMs = performance.now();
+      const speed = parseFloat(speedSel.value) || 1;
+      function step(now) {
+        if (!playing) return; // paused
+        const elapsed = (now - startMs) / 1000 * speed;
+        while (pointer < path.length && path[pointer].t <= elapsed) pointer++;
+        drawFrame(pointer);
+        if (pointer >= path.length) { playing = false; playBtn.textContent = 'Play'; return; }
+        requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    }
+
+    function togglePlay() {
+      if (!playing) playCurrent(); else { playing = false; playBtn.textContent = 'Play'; }
+    }
+
+    function next() { idx = Math.min(records.length - 1, idx + 1); playing = false; playBtn.textContent = 'Play'; pointer = 0; updateHUD(); drawFrame(0); }
+    function prev() { idx = Math.max(0, idx - 1); playing = false; playBtn.textContent = 'Play'; pointer = 0; updateHUD(); drawFrame(0); }
+
+    // wire up
+    reloadBtn.addEventListener('click', async () => { const list = await loadSessions(); if (list.length) await loadData(sessionSel.value); });
+    sessionSel.addEventListener('change', () => loadData(sessionSel.value));
+    playBtn.addEventListener('click', togglePlay);
+    nextBtn.addEventListener('click', next);
+    prevBtn.addEventListener('click', prev);
+    speedSel.addEventListener('change', () => { if (playing) { playing = false; playBtn.textContent = 'Play'; playCurrent(); } });
+
+    // init
+    (async function(){
+      const list = await loadSessions();
+      if (list.length) await loadData(list[list.length - 1]);
+    })();
+  </script>
+</body>
+</html>
+
